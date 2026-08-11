@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Drone Sighting Command Post</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <style>
+    html, body, #map { height: 100%; margin: 0; }
+    #panel {
+      position: absolute; top: 10px; right: 10px; z-index: 1000;
+      background: rgba(20,20,20,0.85); color: #eee; font-family: sans-serif;
+      padding: 12px 16px; border-radius: 8px; max-width: 320px; font-size: 13px;
+    }
+    #panel h3 { margin: 0 0 8px; font-size: 15px; }
+    .fix-good { color: #4caf50; }
+    .fix-marginal { color: #ffb300; }
+    .fix-low { color: #f44336; }
+    .report-row { border-top: 1px solid #444; padding-top: 4px; margin-top: 4px; }
+    button { margin-top: 8px; padding: 4px 8px; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <div id="panel">
+    <h3>🛰 Drone Sighting Command Post</h3>
+    <div id="status">Connecting...</div>
+    <div id="fixes"></div>
+    <div id="reports"></div>
+    <button id="resetBtn">Reset all reports</button>
+  </div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="/socket.io/socket.io.js"></script>
+  <script>
+    const map = L.map('map').setView([1.3521, 103.8198], 13); // Singapore default center
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '&copy; OpenStreetMap contributors',
+      maxZoom: 19,
+    }).addTo(map);
+
+    let officerMarkers = {};
+    let bearingLines = [];
+    let fixMarkers = [];
+
+    // Project a point forward along a bearing (great-circle) for drawing bearing rays.
+    function project(lat, lon, bearingDeg, distanceKm) {
+      const R = 6371;
+      const brng = bearingDeg * Math.PI / 180;
+      const lat1 = lat * Math.PI / 180, lon1 = lon * Math.PI / 180;
+      const lat2 = Math.asin(Math.sin(lat1) * Math.cos(distanceKm / R) +
+        Math.cos(lat1) * Math.sin(distanceKm / R) * Math.cos(brng));
+      const lon2 = lon1 + Math.atan2(
+        Math.sin(brng) * Math.sin(distanceKm / R) * Math.cos(lat1),
+        Math.cos(distanceKm / R) - Math.sin(lat1) * Math.sin(lat2));
+      return [lat2 * 180 / Math.PI, lon2 * 180 / Math.PI];
+    }
+
+    function clearLayer(list) { list.forEach(l => map.removeLayer(l)); return []; }
+
+    function render(state) {
+      officerMarkers = (() => {
+        Object.values(officerMarkers).forEach(m => map.removeLayer(m));
+        return {};
+      })();
+      bearingLines = clearLayer(bearingLines);
+      fixMarkers = clearLayer(fixMarkers);
+
+      const bounds = [];
+
+      // Only draw the most recent report per officer as their live position/bearing.
+      const latestByOfficer = {};
+      for (const r of state.reports) {
+        if (!latestByOfficer[r.officerId] || r.timestampMs > latestByOfficer[r.officerId].timestampMs) {
+          latestByOfficer[r.officerId] = r;
+        }
+      }
+      for (const r of Object.values(latestByOfficer)) {
+        const photoHtml = r.photoDataUrl
+          ? `<br/><img src="${r.photoDataUrl}" style="max-width:200px;max-height:150px;margin-top:4px;border-radius:4px;" />`
+          : '';
+        const marker = L.marker([r.lat, r.lon]).addTo(map).bindPopup(`Officer ${r.officerId}<br/>Bearing ${r.bearingDeg.toFixed(0)}°${photoHtml}`);
+        officerMarkers[r.officerId] = marker;
+        bounds.push([r.lat, r.lon]);
+        const far = project(r.lat, r.lon, r.bearingDeg, 2); // draw 2km ray
+        const line = L.polyline([[r.lat, r.lon], far], { color: '#2196f3', weight: 2, dashArray: '6 4' }).addTo(map);
+        bearingLines.push(line);
+      }
+
+      for (const fix of state.fixes) {
+        const color = fix.confidence === 'good' ? '#4caf50' : fix.confidence === 'marginal' ? '#ffb300' : '#f44336';
+        const marker = L.circleMarker([fix.lat, fix.lon], { radius: 10, color, fillColor: color, fillOpacity: 0.6 })
+          .addTo(map)
+          .bindPopup(`Estimated drone position<br/>Confidence: ${fix.confidence}`);
+        fixMarkers.push(marker);
+        bounds.push([fix.lat, fix.lon]);
+      }
+
+      if (bounds.length > 0) map.fitBounds(bounds, { padding: [60, 60], maxZoom: 17 });
+
+      document.getElementById('status').textContent = `${state.reports.length} report(s), ${state.fixes.length} fix(es)`;
+      document.getElementById('fixes').innerHTML = state.fixes.map(f =>
+        `<div class="report-row fix-${f.confidence}">Fix: ${f.lat.toFixed(5)}, ${f.lon.toFixed(5)} — ${f.confidence} (crossing ${f.pairFixes[0]?.crossingAngleDeg.toFixed(0)}°)</div>`
+      ).join('');
+      document.getElementById('reports').innerHTML = state.reports.slice(-8).reverse().map(r =>
+        `<div class="report-row">${r.officerId} @ ${new Date(r.timestampMs).toLocaleTimeString()} — brg ${r.bearingDeg.toFixed(0)}°` +
+        (r.photoDataUrl ? `<br/><img src="${r.photoDataUrl}" style="max-width:120px;max-height:90px;margin-top:4px;border-radius:4px;cursor:pointer;" onclick="window.open('${r.photoDataUrl}')" />` : '') +
+        `</div>`
+      ).join('');
+    }
+
+    const socket = io();
+    socket.on('connect', () => { document.getElementById('status').textContent = 'Connected. Waiting for reports...'; });
+    socket.on('state', render);
+
+    document.getElementById('resetBtn').onclick = () => fetch('/reset', { method: 'POST' });
+  </script>
+</body>
+</html>
