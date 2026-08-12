@@ -2,6 +2,18 @@ const toRad = (deg) => (deg * Math.PI) / 180;
 const toDeg = (rad) => (rad * 180) / Math.PI;
 const norm360 = (deg) => ((deg % 360) + 360) % 360;
 
+const EARTH_RADIUS_KM = 6371;
+// Generous upper bound for a naked-eye/camera drone sighting — anything further than this
+// cannot be a real fix and means the bearings didn't actually converge nearby.
+const MAX_PLAUSIBLE_SIGHTING_RANGE_KM = 30;
+
+const haversineKm = (a, b) => {
+  const phi1 = toRad(a.lat), phi2 = toRad(b.lat);
+  const dPhi = toRad(b.lat - a.lat), dLambda = toRad(b.lon - a.lon);
+  const h = Math.sin(dPhi / 2) ** 2 + Math.cos(phi1) * Math.cos(phi2) * Math.sin(dLambda / 2) ** 2;
+  return 2 * EARTH_RADIUS_KM * Math.asin(Math.sqrt(h));
+};
+
 // Intersection of two great-circle paths, each defined by a start point + bearing.
 // Standard formula: https://www.movable-type.co.uk/scripts/latlong.html#intersection
 // Returns null if the two bearings are parallel or diverge (no real intersection).
@@ -51,15 +63,29 @@ export function intersectBearings(p1, brng1Deg, p2, brng2Deg) {
   );
   const lambda3 = lambda1 + dLambda13;
 
+  const fixLat = toDeg(phi3);
+  const fixLon = toDeg(lambda3);
+  const fixPoint = { lat: fixLat, lon: fixLon };
+
+  // Sanity check: two great circles always cross at two points, exactly antipodal to
+  // each other on the globe. When the reported bearings don't actually converge on a
+  // real nearby point (noisy compass readings, or observers not looking at the same
+  // target), this formula can pick the far-side intersection instead of failing —
+  // which surfaces as a "fix" ~20,000km away (e.g. off the coast of Colombia for a
+  // sighting in Tampines). Reject anything outside a plausible sighting range instead.
+  if (haversineKm(p1, fixPoint) > MAX_PLAUSIBLE_SIGHTING_RANGE_KM ||
+      haversineKm(p2, fixPoint) > MAX_PLAUSIBLE_SIGHTING_RANGE_KM) {
+    return null;
+  }
+
   // Crossing angle at the intersection — how "square" the two bearing lines meet.
   // Near 0/180 = unstable fix (lines nearly parallel), near 90 = most stable.
   const crossingAngleDeg = norm360(toDeg(Math.abs(alpha1)));
-  const crossingAngleNorm = Math.min(crossingAngleDeg, 180 - crossingAngleDeg > 0 ? crossingAngleDeg : crossingAngleDeg);
   const acute = crossingAngleDeg > 90 ? 180 - crossingAngleDeg : crossingAngleDeg;
 
   return {
-    lat: toDeg(phi3),
-    lon: toDeg(lambda3),
+    lat: fixLat,
+    lon: fixLon,
     crossingAngleDeg: acute,
     confidence: acute >= 30 ? "good" : acute >= 15 ? "marginal" : "low",
   };
