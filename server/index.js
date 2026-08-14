@@ -5,9 +5,36 @@ import multer from "multer";
 import { Server } from "socket.io";
 import path from "path";
 import { fileURLToPath } from "url";
+import { execFile } from "child_process";
+import { promisify } from "util";
+import fs from "fs/promises";
+import os from "os";
+import ffmpegPath from "ffmpeg-static";
 import { intersectBearings } from "./triangulate.js";
 
+const execFileAsync = promisify(execFile);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+// Officer phones (especially iPhones) record HEVC/.mov clips that most browsers
+// can't play inline via <video>. Transcode to H.264/AAC MP4 so the dashboard can
+// always play it back. Falls back to the original upload if ffmpeg fails.
+async function toPlayableMp4(buffer) {
+  const tmpIn = path.join(os.tmpdir(), `in-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+  const tmpOut = `${tmpIn}.mp4`;
+  try {
+    await fs.writeFile(tmpIn, buffer);
+    await execFileAsync(ffmpegPath, [
+      "-y", "-i", tmpIn,
+      "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+      "-c:a", "aac", "-movflags", "+faststart",
+      tmpOut,
+    ]);
+    return await fs.readFile(tmpOut);
+  } finally {
+    await fs.rm(tmpIn, { force: true });
+    await fs.rm(tmpOut, { force: true });
+  }
+}
 
 const app = express();
 app.use(cors());
@@ -80,7 +107,7 @@ function broadcastState() {
   io.emit("state", { reports, fixes: computeFixes() });
 }
 
-app.post("/report", upload.single("video"), (req, res) => {
+app.post("/report", upload.single("video"), async (req, res) => {
   const { officerId, timestampMs } = req.body || {};
   const lat = Number(req.body?.lat);
   const lon = Number(req.body?.lon);
@@ -93,7 +120,13 @@ app.post("/report", upload.single("video"), (req, res) => {
   }
   const id = nextId++;
   if (req.file) {
-    media.set(id, { buffer: req.file.buffer, mimeType: req.file.mimetype || "video/mp4" });
+    try {
+      const mp4 = await toPlayableMp4(req.file.buffer);
+      media.set(id, { buffer: mp4, mimeType: "video/mp4" });
+    } catch (err) {
+      console.error("Transcode failed, storing original upload:", err.message);
+      media.set(id, { buffer: req.file.buffer, mimeType: req.file.mimetype || "video/mp4" });
+    }
   }
   const report = {
     id,
