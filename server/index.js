@@ -1,6 +1,7 @@
 import express from "express";
 import cors from "cors";
 import http from "http";
+import multer from "multer";
 import { Server } from "socket.io";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -10,14 +11,17 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const app = express();
 app.use(cors());
-app.use(express.json({ limit: "15mb" })); // photos come in as base64
+app.use(express.json());
 app.use(express.static(path.join(__dirname, "../dashboard/public")));
+
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } });
 
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: "*" } });
 
 // In-memory store — fine for a PoC demo, swap for a real DB before any operational use.
-const reports = []; // { id, officerId, lat, lon, bearingDeg, timestampMs, photoDataUrl }
+const reports = []; // { id, officerId, lat, lon, bearingDeg, timestampMs, videoUrl }
+const media = new Map(); // id -> { buffer, mimeType }
 const SIGHTING_WINDOW_MS = 60_000; // reports within 60s of each other are treated as the same sighting
 
 let nextId = 1;
@@ -76,25 +80,38 @@ function broadcastState() {
   io.emit("state", { reports, fixes: computeFixes() });
 }
 
-app.post("/report", (req, res) => {
-  const { officerId, lat, lon, bearingDeg, timestampMs, photoDataUrl } = req.body || {};
+app.post("/report", upload.single("video"), (req, res) => {
+  const { officerId, timestampMs } = req.body || {};
+  const lat = Number(req.body?.lat);
+  const lon = Number(req.body?.lon);
+  const bearingDeg = Number(req.body?.bearingDeg);
   if (
     typeof officerId !== "string" ||
-    typeof lat !== "number" || typeof lon !== "number" ||
-    typeof bearingDeg !== "number"
+    !Number.isFinite(lat) || !Number.isFinite(lon) || !Number.isFinite(bearingDeg)
   ) {
     return res.status(400).json({ error: "officerId, lat, lon, bearingDeg are required" });
   }
+  const id = nextId++;
+  if (req.file) {
+    media.set(id, { buffer: req.file.buffer, mimeType: req.file.mimetype || "video/mp4" });
+  }
   const report = {
-    id: nextId++,
+    id,
     officerId,
     lat, lon, bearingDeg,
-    timestampMs: typeof timestampMs === "number" ? timestampMs : Date.now(),
-    photoDataUrl: photoDataUrl || null,
+    timestampMs: Number.isFinite(Number(timestampMs)) ? Number(timestampMs) : Date.now(),
+    videoUrl: req.file ? `/media/${id}/video` : null,
   };
   reports.push(report);
   broadcastState();
   res.json({ ok: true, id: report.id });
+});
+
+app.get("/media/:id/video", (req, res) => {
+  const entry = media.get(Number(req.params.id));
+  if (!entry) return res.status(404).end();
+  res.setHeader("Content-Type", entry.mimeType);
+  res.end(entry.buffer);
 });
 
 app.get("/state", (_req, res) => {
@@ -103,6 +120,7 @@ app.get("/state", (_req, res) => {
 
 app.post("/reset", (_req, res) => {
   reports.length = 0;
+  media.clear();
   broadcastState();
   res.json({ ok: true });
 });
