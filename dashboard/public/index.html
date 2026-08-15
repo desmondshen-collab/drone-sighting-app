@@ -58,6 +58,14 @@
 
     function clearLayer(list) { list.forEach(l => map.removeLayer(l)); return []; }
 
+    function mediaHtml(r, maxWidth, maxHeight) {
+      if (!r.mediaUrl) return '';
+      const style = `max-width:${maxWidth}px;max-height:${maxHeight}px;margin-top:4px;border-radius:4px;`;
+      return r.mediaType === 'photo'
+        ? `<br/><img src="${r.mediaUrl}" style="${style}"/>`
+        : `<br/><video src="${r.mediaUrl}" controls style="${style}"></video>`;
+    }
+
     function render(state) {
       officerMarkers = (() => {
         Object.values(officerMarkers).forEach(m => map.removeLayer(m));
@@ -76,10 +84,7 @@
         }
       }
       for (const r of Object.values(latestByOfficer)) {
-        const videoHtml = r.videoUrl
-          ? `<br/><video src="${r.videoUrl}" controls style="max-width:220px;max-height:160px;margin-top:4px;border-radius:4px;"></video>`
-          : '';
-        const marker = L.marker([r.lat, r.lon]).addTo(map).bindPopup(`Officer ${r.officerId}<br/>Bearing ${r.bearingDeg.toFixed(0)}°${videoHtml}`);
+        const marker = L.marker([r.lat, r.lon]).addTo(map).bindPopup(`Officer ${r.officerId}<br/>Bearing ${r.bearingDeg.toFixed(0)}°${mediaHtml(r, 220, 160)}`);
         officerMarkers[r.officerId] = marker;
         bounds.push([r.lat, r.lon]);
         const far = project(r.lat, r.lon, r.bearingDeg, 2); // draw 2km ray
@@ -104,7 +109,7 @@
       ).join('');
       document.getElementById('reports').innerHTML = state.reports.slice(-8).reverse().map(r =>
         `<div class="report-row">${r.officerId} @ ${new Date(r.timestampMs).toLocaleTimeString()} — brg ${r.bearingDeg.toFixed(0)}°` +
-        (r.videoUrl ? `<br/><video src="${r.videoUrl}" controls style="max-width:140px;max-height:100px;margin-top:4px;border-radius:4px;"></video>` : '') +
+        mediaHtml(r, 140, 100) +
         `</div>`
       ).join('');
     }
