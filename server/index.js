@@ -47,7 +47,7 @@ const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: "*" } });
 
 // In-memory store — fine for a PoC demo, swap for a real DB before any operational use.
-const reports = []; // { id, officerId, lat, lon, bearingDeg, timestampMs, videoUrl }
+const reports = []; // { id, officerId, lat, lon, bearingDeg, timestampMs, mediaUrl, mediaType }
 const media = new Map(); // id -> { buffer, mimeType }
 const SIGHTING_WINDOW_MS = 60_000; // reports within 60s of each other are treated as the same sighting
 
@@ -107,11 +107,12 @@ function broadcastState() {
   io.emit("state", { reports, fixes: computeFixes() });
 }
 
-app.post("/report", upload.single("video"), async (req, res) => {
+app.post("/report", upload.single("media"), async (req, res) => {
   const { officerId, timestampMs } = req.body || {};
   const lat = Number(req.body?.lat);
   const lon = Number(req.body?.lon);
   const bearingDeg = Number(req.body?.bearingDeg);
+  const mediaType = req.body?.mediaType === "photo" ? "photo" : "video";
   if (
     typeof officerId !== "string" ||
     !Number.isFinite(lat) || !Number.isFinite(lon) || !Number.isFinite(bearingDeg)
@@ -120,12 +121,17 @@ app.post("/report", upload.single("video"), async (req, res) => {
   }
   const id = nextId++;
   if (req.file) {
-    try {
-      const mp4 = await toPlayableMp4(req.file.buffer);
-      media.set(id, { buffer: mp4, mimeType: "video/mp4" });
-    } catch (err) {
-      console.error("Transcode failed, storing original upload:", err.message);
-      media.set(id, { buffer: req.file.buffer, mimeType: req.file.mimetype || "video/mp4" });
+    if (mediaType === "photo") {
+      // Photos need no transcode — just store the JPEG as-is.
+      media.set(id, { buffer: req.file.buffer, mimeType: req.file.mimetype || "image/jpeg" });
+    } else {
+      try {
+        const mp4 = await toPlayableMp4(req.file.buffer);
+        media.set(id, { buffer: mp4, mimeType: "video/mp4" });
+      } catch (err) {
+        console.error("Transcode failed, storing original upload:", err.message);
+        media.set(id, { buffer: req.file.buffer, mimeType: req.file.mimetype || "video/mp4" });
+      }
     }
   }
   const report = {
@@ -133,14 +139,15 @@ app.post("/report", upload.single("video"), async (req, res) => {
     officerId,
     lat, lon, bearingDeg,
     timestampMs: Number.isFinite(Number(timestampMs)) ? Number(timestampMs) : Date.now(),
-    videoUrl: req.file ? `/media/${id}/video` : null,
+    mediaUrl: req.file ? `/media/${id}` : null,
+    mediaType: req.file ? mediaType : null,
   };
   reports.push(report);
   broadcastState();
   res.json({ ok: true, id: report.id });
 });
 
-app.get("/media/:id/video", (req, res) => {
+app.get("/media/:id", (req, res) => {
   const entry = media.get(Number(req.params.id));
   if (!entry) return res.status(404).end();
   res.setHeader("Content-Type", entry.mimeType);
