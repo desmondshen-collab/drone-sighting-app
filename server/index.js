@@ -71,13 +71,23 @@ function computeFixes() {
   const groups = groupIntoSightings();
   const fixes = [];
   for (const group of groups) {
-    if (group.length < 2) continue;
+    // Use only each officer's most recent report within the window — matches what
+    // the dashboard actually draws as bearing lines (also latest-per-officer). Without
+    // this, a retried/duplicate report from one officer got paired against a stale
+    // bearing from another, pulling the averaged fix off of where the drawn lines cross.
+    const latestByOfficer = {};
+    for (const r of group) {
+      if (!latestByOfficer[r.officerId] || r.timestampMs > latestByOfficer[r.officerId].timestampMs) {
+        latestByOfficer[r.officerId] = r;
+      }
+    }
+    const officerReports = Object.values(latestByOfficer);
+    if (officerReports.length < 2) continue;
     // Pair up every distinct officer combination in the group and average the fixes.
     const pairFixes = [];
-    for (let i = 0; i < group.length; i++) {
-      for (let j = i + 1; j < group.length; j++) {
-        const a = group[i], b = group[j];
-        if (a.officerId === b.officerId) continue;
+    for (let i = 0; i < officerReports.length; i++) {
+      for (let j = i + 1; j < officerReports.length; j++) {
+        const a = officerReports[i], b = officerReports[j];
         const fix = intersectBearings(
           { lat: a.lat, lon: a.lon }, a.bearingDeg,
           { lat: b.lat, lon: b.lon }, b.bearingDeg
@@ -92,7 +102,7 @@ function computeFixes() {
         ? "good"
         : pairFixes.some((f) => f.confidence === "marginal") ? "marginal" : "low";
       fixes.push({
-        sightingReports: group.map((r) => r.id),
+        sightingReports: officerReports.map((r) => r.id),
         lat, lon,
         confidence: bestConfidence,
         pairFixes,
